@@ -1,0 +1,23 @@
+# lan-jukebox client config.
+# Copy to: ~/.config/lan-jukebox/config   (or set MUSIC_CONFIG to another path)
+# Values here are documentation examples only - replace with your own.
+#
+#   TAILSCALE_HOST  stable tailnet IPv4 of the music server (`tailscale ip -4`
+#                   run on the server). Same value works at home and away;
+#                   Tailscale routes it directly over LAN when local.
+#   LAN_HOST        server's LAN IPv4, used as startup fallback and as
+#                   --host lan override.
+#   MPD_PORT        MPD control port (must match server mpd.conf `port`).
+#   STREAM_PORT     MPD httpd output port (must match server `audio_output`).
+#   MPD_OUTPUT      MPD output name (must match server `audio_output` name).
+
+TAILSCALE_HOST="100.64.0.10"
+LAN_HOST="192.168.50.10"
+MPD_PORT="6600"
+STREAM_PORT="8000"
+MPD_OUTPUT="FLAC LAN Stream"
+
+# Environment variables with the same effect (override this file):
+#   MUSIC_TAILSCALE_HOST, MUSIC_LAN_HOST, MUSIC_MPD_PORT,
+#   MUSIC_STREAM_PORT, MUSIC_MPD_OUTPUT, MUSIC_HOST,
+#   MUSIC_CACHE_SECS=3, MUSIC_MUTE=1

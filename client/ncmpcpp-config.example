@@ -1,0 +1,78 @@
+# Example ncmpcpp config for lan-jukebox (remote MPD over Tailscale/LAN).
+# Install as: ~/.config/ncmpcpp/config
+#
+# Replace mpd_host with your server's tailnet IP (same value as
+# TAILSCALE_HOST in ~/.config/lan-jukebox/config). The `music` launcher
+# passes --host/--port explicitly, so this file is a fallback for running
+# ncmpcpp standalone.
+
+mpd_host = "100.64.0.10"
+mpd_port = "6600"
+mpd_connection_timeout = "10"
+startup_screen = "playlist"
+
+# This is a remote MPD server, so its FIFO visualizer cannot exist locally.
+# Point the optional screen at a harmless readable source and a real output to
+# avoid false startup errors; playback and all control screens remain intact.
+visualizer_data_source = "/dev/null"
+visualizer_output_name = "FLAC LAN Stream"
+
+# General UI
+ncmpcpp_directory = "~/.config/ncmpcpp"
+lyrics_directory = "~/.config/ncmpcpp/lyrics"
+
+playlist_disable_highlight_delay = "0"
+message_delay_time = "2"
+autocenter_mode = "yes"
+centered_cursor = "yes"
+mouse_support = "yes"
+user_interface = "alternative"
+titles_visibility = "yes"
+header_visibility = "yes"
+statusbar_visibility = "yes"
+cyclic_scrolling = "yes"
+follow_now_playing_lyrics = "yes"
+
+# Display modes
+browser_display_mode = "columns"
+search_engine_display_mode = "columns"
+playlist_display_mode = "columns"
+playlist_editor_display_mode = "columns"
+
+# Library behaviour
+media_library_primary_tag = "album_artist"
+empty_tag_marker = "<unknown>"
+ignore_leading_the = "yes"
+
+# Now playing / playlist formatting
+song_list_format = "{$5%a$9 - }{$8%t$9}|{$8%f$9}"
+song_status_format = "$b{$7%a$9 - $6%t$9}|{$8%f$9}$b"
+song_library_format = "{%n - }{%t}|{%f}"
+current_item_prefix = "$(blue)$r"
+current_item_suffix = "$/r$(end)"
+
+# Columns: track number, title, artist, album, length
+song_columns_list_format = "(5f)[cyan]{n} (45)[white]{t|f} (25)[blue]{a} (35)[magenta]{b} (7f)[green]{l}"
+
+# Progress/status
+progressbar_look = "━━━"
+progressbar_color = "black"
+now_playing_prefix = "$b$(green)▶ $/b"
+now_playing_suffix = "$/b$(end)"
+
+# Colors
+colors_enabled = "yes"
+main_window_color = "white"
+header_window_color = "cyan"
+volume_color = "green"
+state_line_color = "blue"
+state_flags_color = "red"
+statusbar_color = "white"
+
+# Playlist
+playlist_show_mpd_host = "no"
+playlist_show_remaining_time = "yes"
+playlist_separate_albums = "yes"
+
+# External editor if needed
+external_editor = "nvim"

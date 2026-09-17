@@ -1,0 +1,55 @@
+# Example MPD server config for lan-jukebox (lossless httpd FLAC stream).
+# Tested with MPD 0.24.x as a per-user service.
+# Install as: ~/.config/mpd/mpd.conf  (then `systemctl --user restart mpd`)
+#
+# Replace /srv/music with the directory containing your library.
+# Replace the /home/USERNAME paths with your server user, or point them at
+# /var/lib/mpd/* if you run MPD as a system service.
+
+music_directory     "/srv/music"
+playlist_directory  "/home/USERNAME/.config/mpd/playlists"
+db_file             "/home/USERNAME/.local/state/mpd/database"
+log_file            "/home/USERNAME/.local/state/mpd/log"
+pid_file            "/home/USERNAME/.local/state/mpd/pid"
+state_file          "/home/USERNAME/.local/state/mpd/state"
+
+# Control channel used by `mpc` / `ncmpcpp` / the `music` launcher.
+# 0.0.0.0 exposes it to LAN + tailnet. If you only want Tailscale clients,
+# bind to the tailnet IP instead, e.g. bind_to_address "100.64.0.10".
+bind_to_address     "0.0.0.0"
+port                "6600"
+
+auto_update         "yes"
+restore_paused      "yes"
+
+filesystem_charset  "UTF-8"
+metadata_to_use     "artist,album,title,track,name,genre,date,albumartist"
+
+# The single output the client expects. Name, encoder, port and format must
+# match the client config (MPD_OUTPUT / STREAM_PORT). `always_on yes` keeps
+# the encoder running so pausing produces silence instead of a dropped HTTP
+# connection; `tags yes` forwards now-playing metadata to the stream.
+audio_output {
+    type        "httpd"
+    name        "FLAC LAN Stream"
+    encoder     "flac"
+    port        "8000"
+    bind_to_address "0.0.0.0"
+    quality     "10"
+    format      "44100:16:2"
+    always_on   "yes"
+    tags        "yes"
+}
+
+# --- Optional hardening ---
+# 1. Password: uncomment, then set MPC_HOST / MPD_HOST + password in the
+#    client, or extend the launcher with: mpc --password '...' / ncmpcpp -P.
+#    password "CHANGE-ME@mpd"
+#
+# 2. Firewall (UFW example, LAN + Tailscale only; replace with your LAN subnet):
+#    sudo ufw allow from 192.168.50.0/24 to any port 6600,8000
+#    sudo ufw allow from 100.64.0.0/10 to any port 6600,8000
+#
+# 3. Verify on the server:
+#    mpc -h localhost -p 6600 outputs
+#    # expect: Output 1 (FLAC LAN Stream) is enabled

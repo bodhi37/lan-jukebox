@@ -1,0 +1,10 @@
+# Local state, logs, and personal configs - never commit these.
+*.log
+.lan-jukebox/
+lan-jukebox/
+mpv.log
+
+# Personalised copies of the examples
+client/config
+config
+*.local

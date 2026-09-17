@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+set -u
+
+# lan-jukebox client launcher.
+#
+# Plays a remote MPD httpd FLAC stream through local mpv, controlled with
+# ncmpcpp. The default endpoint is the server's stable Tailscale IP: it stays
+# constant while roaming, and resolves to a direct LAN path when both ends are
+# on the same network. Raw LAN is an automatic startup fallback and remains
+# available as an explicit override.
+#
+# Configuration order (later wins):
+#   1. Built-in defaults below (documentation examples only - edit them)
+#   2. Config file: ${MUSIC_CONFIG:-$XDG_CONFIG_HOME/lan-jukebox/config}
+#   3. Environment: MUSIC_TAILSCALE_HOST, MUSIC_LAN_HOST, MUSIC_MPD_PORT,
+#      MUSIC_STREAM_PORT, MUSIC_MPD_OUTPUT, MUSIC_HOST, MUSIC_CACHE_SECS,
+#      MUSIC_MUTE
+#   4. CLI: --host auto|lan|tailscale|ADDRESS
+#
+# Copy client/config.example to the config path above on a new machine.
+
+# --- Defaults (examples only; override via config file or environment) ---
+TAILSCALE_HOST="100.64.0.10"   # Example tailnet IP. Replace with: tailscale ip -4
+LAN_HOST="192.168.50.10"       # Example LAN IP. Replace with the server's LAN IP.
+MPD_PORT="6600"
+STREAM_PORT="8000"
+MPD_OUTPUT="FLAC LAN Stream"
+
+CONFIG_FILE="${MUSIC_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/lan-jukebox/config}"
+# shellcheck disable=SC1090
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck source=/dev/null
+  . "$CONFIG_FILE"
+fi
+
+TAILSCALE_HOST="${MUSIC_TAILSCALE_HOST:-$TAILSCALE_HOST}"
+LAN_HOST="${MUSIC_LAN_HOST:-$LAN_HOST}"
+MPD_PORT="${MUSIC_MPD_PORT:-$MPD_PORT}"
+STREAM_PORT="${MUSIC_STREAM_PORT:-$STREAM_PORT}"
+MPD_OUTPUT="${MUSIC_MPD_OUTPUT:-$MPD_OUTPUT}"
+
+CHECK_ONLY=0
+REQUESTED_HOST="${MUSIC_HOST:-auto}"
+SCRIPT_PATH="$(readlink -f "$0")"
+
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/lan-jukebox"
+RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp/lan-jukebox-${UID}}"
+RUNTIME_DIR="${RUNTIME_BASE}/lan-jukebox"
+MPV_LOG="${STATE_DIR}/mpv.log"
+MPV_PIDFILE="${RUNTIME_DIR}/mpv.pid"
+SUPERVISOR_PIDFILE="${RUNTIME_DIR}/supervisor.pid"
+
+mkdir -p "$STATE_DIR" "$RUNTIME_DIR"
+chmod 0700 "$STATE_DIR" "$RUNTIME_DIR" 2>/dev/null || true
+
+usage() {
+  cat <<EOF
+Usage: music [--check] [--host auto|lan|tailscale|ADDRESS]
+
+Starts ncmpcpp and plays the homelab FLAC MPD stream through local mpv.
+The default uses the server's stable Tailscale IP everywhere. Tailscale uses
+a direct LAN path at home and keeps the same destination while roaming. Raw
+LAN is an automatic startup fallback and remains available as an override.
+
+  --check       Verify dependencies, both network paths, MPD, and the stream
+  --host VALUE  Override endpoint selection (also available as MUSIC_HOST)
+
+Config file: ${CONFIG_FILE}
+Env overrides: MUSIC_TAILSCALE_HOST, MUSIC_LAN_HOST, MUSIC_MPD_PORT,
+  MUSIC_STREAM_PORT, MUSIC_MPD_OUTPUT, MUSIC_HOST, MUSIC_CACHE_SECS,
+  MUSIC_MUTE=1 to start muted.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --check)
+      CHECK_ONLY=1
+      shift
+      ;;
+    --host)
+      if (($# < 2)); then
+        echo "music: --host requires a value" >&2
+        exit 2
+      fi
+      REQUESTED_HOST="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "music: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+for command_name in flock ip mpv ncmpcpp mpc timeout; do
+  command -v "$command_name" >/dev/null 2>&1 || {
+    echo "music: required command is not installed: $command_name" >&2
+    exit 1
+  }
+done
+
+tcp_reachable() {
+  timeout 3 bash -c 'exec 3<>"/dev/tcp/${1}/${2}"' bash "$1" "$2" >/dev/null 2>&1
+}
+
+mpd_reachable() {
+  timeout 5 mpc --quiet -h "$1" -p "$MPD_PORT" status >/dev/null 2>&1
+}
+
+endpoint_ready() {
+  [[ -n "$1" ]] || return 1
+  mpd_reachable "$1" &&
+    tcp_reachable "$1" "$STREAM_PORT" &&
+    timeout 5 mpc -h "$1" -p "$MPD_PORT" outputs 2>/dev/null | grep -Fq "(${MPD_OUTPUT})"
+}
+
+route_for() {
+  ip -4 route get "$1" 2>/dev/null | head -n 1
+}
+
+require_configured() {
+  local host="$1"
+  if [[ -z "$host" ]]; then
+    echo "music: no host configured. Copy client/config.example to ${CONFIG_FILE}" >&2
+    echo "music: or set MUSIC_TAILSCALE_HOST / MUSIC_LAN_HOST." >&2
+    return 1
+  fi
+}
+
+select_host() {
+  case "$REQUESTED_HOST" in
+    auto|"")
+      # Give tailscaled a short opportunity to finish starting before using
+      # raw LAN. A stable tailnet destination is what makes roaming seamless.
+      if [[ -n "$TAILSCALE_HOST" ]]; then
+        for _attempt in 1 2 3; do
+          if endpoint_ready "$TAILSCALE_HOST"; then
+            MPD_HOST="$TAILSCALE_HOST"
+            CONNECTION_KIND="Tailscale roaming"
+            return 0
+          fi
+          sleep 1
+        done
+      fi
+      if [[ -n "$LAN_HOST" ]] && endpoint_ready "$LAN_HOST"; then
+        MPD_HOST="$LAN_HOST"
+        CONNECTION_KIND="raw LAN fallback"
+        return 0
+      fi
+      echo "music: cannot reach server over Tailscale (${TAILSCALE_HOST:-unset}) or LAN (${LAN_HOST:-unset})" >&2
+      return 1
+      ;;
+    lan)
+      require_configured "$LAN_HOST" || return 1
+      MPD_HOST="$LAN_HOST"
+      CONNECTION_KIND="raw LAN (forced)"
+      ;;
+    tailscale)
+      require_configured "$TAILSCALE_HOST" || return 1
+      MPD_HOST="$TAILSCALE_HOST"
+      CONNECTION_KIND="Tailscale (forced)"
+      ;;
+    *)
+      MPD_HOST="$REQUESTED_HOST"
+      CONNECTION_KIND="custom host"
+      ;;
+  esac
+
+  if ! endpoint_ready "$MPD_HOST"; then
+    echo "music: cannot reach MPD control and stream at ${MPD_HOST}:${MPD_PORT}/${STREAM_PORT}" >&2
+    return 1
+  fi
+}
+
+check_endpoint() {
+  local label="$1" host="$2" route
+  if [[ -z "$host" ]]; then
+    printf '%-10s SKIP %-15s  %s\n' "$label" "(unset)" "set it in ${CONFIG_FILE}"
+    return 1
+  fi
+  route="$(route_for "$host" || true)"
+  if endpoint_ready "$host"; then
+    printf '%-10s OK  %-15s  %s\n' "$label" "$host" "${route:-route unavailable}"
+    return 0
+  fi
+  printf '%-10s FAIL %-15s  %s\n' "$label" "$host" "${route:-route unavailable}"
+  return 1
+}
+
+if ((CHECK_ONLY)); then
+  tail_ok=0
+  lan_ok=0
+  check_endpoint Tailscale "$TAILSCALE_HOST" && tail_ok=1
+  check_endpoint LAN "$LAN_HOST" && lan_ok=1
+  printf 'ncmpcpp   %s\n' "$(ncmpcpp --version | head -n 1)"
+  printf 'mpv       %s\n' "$(mpv --version | head -n 1)"
+  case "$REQUESTED_HOST" in
+    auto|"")
+      if ((tail_ok)); then
+        echo "default    Tailscale roaming endpoint (LAN-direct when local)"
+      elif ((lan_ok)); then
+        echo "default    raw LAN fallback; Tailscale is unavailable"
+      else
+        echo "music client: FAIL (no usable path to server)" >&2
+        exit 1
+      fi
+      ;;
+    tailscale)
+      ((tail_ok)) || { echo "music client: FAIL (forced Tailscale path unavailable)" >&2; exit 1; }
+      echo "selected   forced Tailscale endpoint"
+      ;;
+    lan)
+      ((lan_ok)) || { echo "music client: FAIL (forced LAN path unavailable)" >&2; exit 1; }
+      echo "selected   forced raw LAN endpoint"
+      ;;
+    *)
+      if ! endpoint_ready "$REQUESTED_HOST"; then
+        echo "music client: FAIL (custom endpoint unavailable: ${REQUESTED_HOST})" >&2
+        exit 1
+      fi
+      printf 'selected   custom endpoint %s\n' "$REQUESTED_HOST"
+      ;;
+  esac
+  echo "music client: OK"
+  exit 0
+fi
+
+# Only one launcher may own the local audio stream. The kernel releases this
+# lock automatically on exit, including crashes, so stale files cannot block a
+# later session.
+LOCK_FILE="${RUNTIME_DIR}/music.lock"
+exec {MUSIC_LOCK_FD}>"$LOCK_FILE"
+if ! flock -n "$MUSIC_LOCK_FD"; then
+  echo "music: another music session is already running on this machine" >&2
+  exit 1
+fi
+
+select_host || exit 1
+STREAM_URL="http://${MPD_HOST}:${STREAM_PORT}"
+
+if ! mpc -h "$MPD_HOST" -p "$MPD_PORT" enable "$MPD_OUTPUT" >/dev/null 2>&1; then
+  echo "music: cannot enable MPD output: ${MPD_OUTPUT}" >&2
+  exit 1
+fi
+
+is_music_mpv() {
+  local pid="$1" cmdline exe
+  [[ "$pid" =~ ^[0-9]+$ && -e "/proc/$pid" ]] || return 1
+  cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+  [[ "${exe##*/}" == "mpv" ]] || return 1
+  # Match the current stream URL plus either configured host, so a previous
+  # session started on the other path (Tailscale vs LAN) is still reaped.
+  [[ "$cmdline" == *"$STREAM_URL"* ]] && return 0
+  [[ -n "$TAILSCALE_HOST" && "$cmdline" == *"http://${TAILSCALE_HOST}:${STREAM_PORT}"* ]] && return 0
+  [[ -n "$LAN_HOST" && "$cmdline" == *"http://${LAN_HOST}:${STREAM_PORT}"* ]] && return 0
+  return 1
+}
+
+stop_old_mpv() {
+  local pid cmdline_path
+
+  if [[ -s "$MPV_PIDFILE" ]]; then
+    pid="$(<"$MPV_PIDFILE")"
+    if is_music_mpv "$pid"; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$MPV_PIDFILE"
+  fi
+
+  for cmdline_path in /proc/[0-9]*/cmdline; do
+    pid="${cmdline_path#/proc/}"
+    pid="${pid%/cmdline}"
+    [[ "$pid" == "$$" ]] && continue
+    if is_music_mpv "$pid"; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+stop_old_supervisor() {
+  local pid cmdline
+
+  [[ -s "$SUPERVISOR_PIDFILE" ]] || return 0
+  pid="$(<"$SUPERVISOR_PIDFILE")"
+  if [[ "$pid" =~ ^[0-9]+$ && -e "/proc/$pid" ]]; then
+    cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    if [[ "$cmdline" == *"$SCRIPT_PATH"* ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$SUPERVISOR_PIDFILE"
+}
+
+stop_old_mpv
+stop_old_supervisor
+: >"$MPV_LOG"
+
+player_loop() {
+  local state player_pid="" player_rc event_pid=""
+  local -a mute_args=()
+
+  if [[ "${MUSIC_MUTE:-0}" == "1" ]]; then
+    mute_args+=(--mute=yes)
+  fi
+
+  trap '[[ -n "$player_pid" ]] && kill "$player_pid" >/dev/null 2>&1; [[ -n "$event_pid" ]] && kill "$event_pid" >/dev/null 2>&1; exit 0' TERM INT
+
+  while true; do
+    state="$(timeout 6 mpc -h "$MPD_HOST" -p "$MPD_PORT" status 2>/dev/null || true)"
+    if [[ "$state" == *"[playing]"* ]]; then
+      mpv \
+        --no-video \
+        --no-terminal \
+        --input-terminal=no \
+        --force-window=no \
+        --ytdl=no \
+        --audio-client-name="Homelab FLAC music" \
+        --audio-buffer=1 \
+        --cache=yes \
+        --cache-pause=yes \
+        --cache-pause-wait=1 \
+        --cache-secs="${MUSIC_CACHE_SECS:-3}" \
+        --demuxer-readahead-secs="${MUSIC_CACHE_SECS:-3}" \
+        --demuxer-max-bytes=32MiB \
+        --network-timeout=10 \
+        --stream-lavf-o=reconnect=1,reconnect_at_eof=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5 \
+        --log-file="$MPV_LOG" \
+        "${mute_args[@]}" \
+        "$STREAM_URL" \
+        >/dev/null 2>&1 < /dev/null &
+
+      player_pid="$!"
+      printf '%s\n' "$player_pid" >"$MPV_PIDFILE"
+      wait "$player_pid" 2>/dev/null
+      player_rc=$?
+      printf '%(%Y-%m-%dT%H:%M:%S%z)T mpv exited rc=%s; retrying if MPD is playing\n' -1 "$player_rc" >>"$MPV_LOG"
+      player_pid=""
+      rm -f "$MPV_PIDFILE"
+      sleep 1
+    else
+      # Block until MPD's player/output state changes instead of opening two
+      # control connections per second while paused.
+      timeout 3600 mpc --quiet -h "$MPD_HOST" -p "$MPD_PORT" idle player output >/dev/null 2>&1 &
+      event_pid="$!"
+      wait "$event_pid" 2>/dev/null || true
+      event_pid=""
+    fi
+  done
+}
+
+player_loop &
+SUPERVISOR_PID="$!"
+printf '%s\n' "$SUPERVISOR_PID" >"$SUPERVISOR_PIDFILE"
+
+cleanup() {
+  kill "$SUPERVISOR_PID" >/dev/null 2>&1 || true
+  wait "$SUPERVISOR_PID" 2>/dev/null || true
+  stop_old_mpv
+  rm -f "$SUPERVISOR_PIDFILE"
+}
+
+trap cleanup EXIT INT TERM
+
+printf 'Connected to music server via %s (%s)\n' "$CONNECTION_KIND" "$MPD_HOST"
+if [[ "$CONNECTION_KIND" == "raw LAN fallback" ]]; then
+  echo "Warning: Tailscale was unavailable at startup; restart music before roaming."
+fi
+
+ncmpcpp --host "$MPD_HOST" --port "$MPD_PORT"
