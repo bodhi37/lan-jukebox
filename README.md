@@ -14,6 +14,23 @@ Ideal for: a FLAC collection on a home server, listened to from any device, anyw
 - **Efficient idle:** blocks on `mpc idle` while paused instead of polling.
 - **Safe single instance:** `flock` guard plus stale `mpv`/supervisor cleanup.
 - **Diagnostics built in:** `music --check` tests deps, routes, MPD, and stream.
+- **Optional server reliability layer:** watchdog repairs a silenced stream and restarts a wedged MPD; crash recovery resumes the same queue at the same position and pause state. See [Reliability (optional)](#reliability-optional).
+
+## Reliability (optional)
+
+The basic setup above is enough to run the jukebox. A permanently-on, headless server faces three failure modes the basic setup leaves to you:
+
+1. **MPD's `httpd` output only binds the stream port after playback starts.** A server that (re)starts while stopped listens on `6600` but not `8000`, so clients see the server but get no stream.
+2. **A disabled output silences everything.** If the FLAC output gets disabled (after an output error, for example), MPD keeps running — but nobody hears anything until someone runs `mpc enable` by hand.
+3. **A crash loses playback position.** MPD's own `state_file` restores the queue, but not where in the track you were or whether you were paused.
+
+The optional reliability layer (`server/RELIABILITY.md`) handles all three unattended:
+
+- **Watchdog** (`lan-jukebox-healthcheck`, every 2 min): checks control port, stream port, and output state. Re-enables a disabled output, starts playback to bind the listener when appropriate, and restarts the service if still unhealthy — exactly one restart, never a loop. An intentionally stopped MPD is never resurrected, and an empty queue is never treated as a failure.
+- **Crash recovery** (`lan-jukebox-recovery`): snapshots queue hash, position, elapsed time, and pause state every 10 s; after an unexpected exit it restores that state — only if the restored queue is identical to the snapshot, and never interpreting snapshot contents as anything but data.
+- **Hardened service**: restart-always systemd unit with library-mount dependencies, sandboxing, and opt-in drop-ins (io_uring workaround, Tailscale ordering).
+
+It is entirely optional: per-user setups work exactly as documented above. Install, configuration, tests, and limitations are in [server/RELIABILITY.md](server/RELIABILITY.md).
 
 ## Requirements
 
