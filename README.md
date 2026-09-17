@@ -14,23 +14,7 @@ Ideal for: a FLAC collection on a home server, listened to from any device, anyw
 - **Efficient idle:** blocks on `mpc idle` while paused instead of polling.
 - **Safe single instance:** `flock` guard plus stale `mpv`/supervisor cleanup.
 - **Diagnostics built in:** `music --check` tests deps, routes, MPD, and stream.
-- **Optional server reliability layer:** watchdog repairs a silenced stream and restarts a wedged MPD; crash recovery resumes the same queue at the same position and pause state. See [Reliability (optional)](#reliability-optional).
-
-## Reliability (optional)
-
-The basic setup above is enough to run the jukebox. A permanently-on, headless server faces three failure modes the basic setup leaves to you:
-
-1. **MPD's `httpd` output only binds the stream port after playback starts.** A server that (re)starts while stopped listens on `6600` but not `8000`, so clients see the server but get no stream.
-2. **A disabled output silences everything.** If the FLAC output gets disabled (after an output error, for example), MPD keeps running — but nobody hears anything until someone runs `mpc enable` by hand.
-3. **A crash loses playback position.** MPD's own `state_file` restores the queue, but not where in the track you were or whether you were paused.
-
-The optional reliability layer (`server/RELIABILITY.md`) handles all three unattended:
-
-- **Watchdog** (`lan-jukebox-healthcheck`, every 2 min): checks control port, stream port, and output state. Re-enables a disabled output, starts playback to bind the listener when appropriate, and restarts the service if still unhealthy — exactly one restart, never a loop. An intentionally stopped MPD is never resurrected, and an empty queue is never treated as a failure.
-- **Crash recovery** (`lan-jukebox-recovery`): snapshots queue hash, position, elapsed time, and pause state every 10 s; after an unexpected exit it restores that state — only if the restored queue is identical to the snapshot, and never interpreting snapshot contents as anything but data.
-- **Hardened service**: restart-always systemd unit with library-mount dependencies, sandboxing, and opt-in drop-ins (io_uring workaround, Tailscale ordering).
-
-It is entirely optional: per-user setups work exactly as documented above. Install, configuration, tests, and limitations are in [server/RELIABILITY.md](server/RELIABILITY.md).
+- **Optional server reliability layer:** watchdog, output repair, and crash recovery keep a headless server playing unattended. See [Reliability (optional)](#reliability-optional).
 
 ## Requirements
 
@@ -97,8 +81,6 @@ lan-jukebox/
 ```
 
 All addresses and paths in this repo are examples. Replace `100.64.0.10` with your server's tailnet IP, `192.168.50.10` with its LAN IP, `/srv/music` with your library, and `/home/USERNAME` with your server user.
-
-For a permanently-on server you can additionally deploy the optional reliability layer (watchdog, output repair, crash recovery): see [server/RELIABILITY.md](server/RELIABILITY.md). The rest of this README covers the basic setup, which works on its own.
 
 ## Server setup
 
@@ -286,8 +268,18 @@ State and logs (local only, never committed):
 - **Single instance:** `flock` on `music.lock`. A second `music` on the same user account exits instead of fighting over audio. The lock is kernel-held, so crashes cannot leave it stale.
 - **Player supervisor:** a background loop polls `mpc status` while deciding what to do, but blocks in `mpc idle player output` (up to 1 h) while paused — one idle connection, no polling storm. While `[playing]`, it runs `mpv` with `--cache-secs`, `--demuxer-readahead-secs`, `--demuxer-max-bytes=32MiB`, `--network-timeout=10`, and lavf `reconnect*` flags so Wi-Fi → hotspot handoffs resume.
 - **Cleanup:** on start, any prior `mpv`/supervisor owned by this script is killed after verifying `/proc` cmdline and PID files (never by bare process name). On exit (`ncmpcpp` quit, Ctrl-C, signal), the supervisor and player are stopped and PID files removed.
-- **Server watchdog and crash recovery:** optional system-service layer re-enables a disabled stream output, restarts wedged MPD, and resumes queue/position/pause after crashes. See [server/RELIABILITY.md](server/RELIABILITY.md).
 - **Why `ncmpcpp` + `mpv`:** `ncmpcpp` is only a controller (no audio), `mpv` only a renderer (no library UI). MPD's FIFO visualizer cannot work remotely, so the example `ncmpcpp` config points it at `/dev/null` to avoid startup errors.
+
+## Reliability (optional)
+
+For a permanently-on server, an optional reliability layer keeps the jukebox playing without manual fixes:
+
+- **Watchdog / healthcheck** — checks the MPD control port, stream port, and output state every 2 min; restarts the service once if it is truly unhealthy. It never resurrects an intentionally stopped server and never restarts for an empty queue.
+- **Output repair** — re-enables a disabled FLAC output and restarts playback when the stream port has not bound after a restart.
+- **Crash recovery** — snapshots the queue, position, and pause state every 10 s; after an unexpected exit, playback resumes where it stopped (only if the queue is unchanged).
+- **Hardened service** — restart-always systemd unit with library-mount dependencies, sandboxing, and opt-in drop-ins (io_uring workaround, Tailscale ordering).
+
+The basic per-user setup needs none of this. Install, configuration, tests, and limitations: [server/RELIABILITY.md](server/RELIABILITY.md).
 
 ## Security
 
@@ -314,7 +306,7 @@ The examples prioritise a trusted home network: no MPD password, binds on `0.0.0
 | `mpv` starts but silent | Local sink/mixer (`pavucontrol`, `wpctl status`, `alsamixer`); `MUSIC_MUTE=0`; inspect `~/.local/state/lan-jukebox/mpv.log`. |
 | `another music session is already running` | Intended guard. `ps aux \| grep '[m]usic'`; stale runtime clears on reboot (`${XDG_RUNTIME_DIR}/lan-jukebox/`). |
 | Drops when roaming networks | Confirm you started via `Tailscale roaming`, not `raw LAN fallback` (banner at startup). Raise buffer: `MUSIC_CACHE_SECS=5` (or `8–10` on flaky links), then restart `music` after Tailscale is up. |
-| `ncmpcpp` connects, library empty | Server `music_directory` wrong/unreadable; run `mpc update` on the server; `journalctl --user -u mpd`. System-service installs with the optional reliability layer: `journalctl -u lan-jukebox-mpd` and `sudo journalctl -t lan-jukebox-healthcheck -t lan-jukebox-recovery`. |
+| `ncmpcpp` connects, library empty | Server `music_directory` wrong/unreadable; run `mpc update` on the server; `journalctl --user -u mpd` (or `journalctl -u lan-jukebox-mpd` with the optional reliability layer). |
 | Stutter on weak links | Raise `MUSIC_CACHE_SECS`, prefer Tailscale path, check `ping`/bandwidth. Stereo FLAC is typically ~1 Mbit/s; `44100:16:2` in the example minimises resampling cost. |
 
 Still stuck? Run and share (redacting your real IPs):
@@ -355,3 +347,4 @@ rm -rf ~/.config/lan-jukebox ~/.config/ncmpcpp ~/.local/state/lan-jukebox
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
