@@ -1,10 +1,12 @@
-# Local state, logs, and personal configs - never commit these.
-*.log
-.lan-jukebox/
-lan-jukebox/
-mpv.log
 
-# Personalised copies of the examples
 client/config
 config
+.lan-jukebox/
+lan-jukebox/
 *.local
+# Local state, logs, and personal configs - never commit these.
+*.log
+mpv.log
+# Personalised copies of the examples
+*.pyc
+__pycache__/

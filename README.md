@@ -71,9 +71,17 @@ lan-jukebox/
     ncmpcpp-config.example   # copy to ~/.config/ncmpcpp/config
   server/
     mpd.conf.example         # copy to ~/.config/mpd/mpd.conf on the server
+    mpd-system.conf.example  # optional system-service profile (RELIABILITY.md)
+    server.env.example       # optional overrides for the reliability layer
+    scripts/                 # optional watchdog + crash-recovery helpers
+    systemd/                 # optional system units + drop-ins (RELIABILITY.md)
+    tests/                   # unit tests (no MPD) + container integration test
+    RELIABILITY.md           # optional server reliability layer
 ```
 
 All addresses and paths in this repo are examples. Replace `100.64.0.10` with your server's tailnet IP, `192.168.50.10` with its LAN IP, `/srv/music` with your library, and `/home/USERNAME` with your server user.
+
+For a permanently-on server you can additionally deploy the optional reliability layer (watchdog, output repair, crash recovery): see [server/RELIABILITY.md](server/RELIABILITY.md). The rest of this README covers the basic setup, which works on its own.
 
 ## Server setup
 
@@ -261,6 +269,7 @@ State and logs (local only, never committed):
 - **Single instance:** `flock` on `music.lock`. A second `music` on the same user account exits instead of fighting over audio. The lock is kernel-held, so crashes cannot leave it stale.
 - **Player supervisor:** a background loop polls `mpc status` while deciding what to do, but blocks in `mpc idle player output` (up to 1 h) while paused — one idle connection, no polling storm. While `[playing]`, it runs `mpv` with `--cache-secs`, `--demuxer-readahead-secs`, `--demuxer-max-bytes=32MiB`, `--network-timeout=10`, and lavf `reconnect*` flags so Wi-Fi → hotspot handoffs resume.
 - **Cleanup:** on start, any prior `mpv`/supervisor owned by this script is killed after verifying `/proc` cmdline and PID files (never by bare process name). On exit (`ncmpcpp` quit, Ctrl-C, signal), the supervisor and player are stopped and PID files removed.
+- **Server watchdog and crash recovery:** optional system-service layer re-enables a disabled stream output, restarts wedged MPD, and resumes queue/position/pause after crashes. See [server/RELIABILITY.md](server/RELIABILITY.md).
 - **Why `ncmpcpp` + `mpv`:** `ncmpcpp` is only a controller (no audio), `mpv` only a renderer (no library UI). MPD's FIFO visualizer cannot work remotely, so the example `ncmpcpp` config points it at `/dev/null` to avoid startup errors.
 
 ## Security
@@ -288,7 +297,7 @@ The examples prioritise a trusted home network: no MPD password, binds on `0.0.0
 | `mpv` starts but silent | Local sink/mixer (`pavucontrol`, `wpctl status`, `alsamixer`); `MUSIC_MUTE=0`; inspect `~/.local/state/lan-jukebox/mpv.log`. |
 | `another music session is already running` | Intended guard. `ps aux \| grep '[m]usic'`; stale runtime clears on reboot (`${XDG_RUNTIME_DIR}/lan-jukebox/`). |
 | Drops when roaming networks | Confirm you started via `Tailscale roaming`, not `raw LAN fallback` (banner at startup). Raise buffer: `MUSIC_CACHE_SECS=5` (or `8–10` on flaky links), then restart `music` after Tailscale is up. |
-| `ncmpcpp` connects, library empty | Server `music_directory` wrong/unreadable; run `mpc update` on the server; `journalctl --user -u mpd`. |
+| `ncmpcpp` connects, library empty | Server `music_directory` wrong/unreadable; run `mpc update` on the server; `journalctl --user -u mpd`. System-service installs with the optional reliability layer: `journalctl -u lan-jukebox-mpd` and `sudo journalctl -t lan-jukebox-healthcheck -t lan-jukebox-recovery`. |
 | Stutter on weak links | Raise `MUSIC_CACHE_SECS`, prefer Tailscale path, check `ping`/bandwidth. Stereo FLAC is typically ~1 Mbit/s; `44100:16:2` in the example minimises resampling cost. |
 
 Still stuck? Run and share (redacting your real IPs):
@@ -323,6 +332,7 @@ tail -n 50 ~/.local/state/lan-jukebox/mpv.log
 rm ~/.local/bin/music
 rm -rf ~/.config/lan-jukebox ~/.config/ncmpcpp ~/.local/state/lan-jukebox
 # server: systemctl --user disable --now mpd; rm ~/.config/mpd/mpd.conf
+# server (optional reliability layer): see server/RELIABILITY.md
 ```
 
 ## License

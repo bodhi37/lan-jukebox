@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Optional system-service watchdog. May enable output, play, or restart MPD.
+set -uo pipefail
+export LC_ALL=C
+MPD_HOST="${MPD_HOST:-127.0.0.1}"
+MPD_PORT="${MPD_PORT:-6600}"
+STREAM_HOST="${STREAM_HOST:-$MPD_HOST}"
+STREAM_PORT="${STREAM_PORT:-8000}"
+STREAM_OUTPUT="${STREAM_OUTPUT:-FLAC LAN Stream}"
+MPD_SERVICE="${MPD_SERVICE:-lan-jukebox-mpd.service}"
+START_STOPPED="${START_STOPPED:-1}"
+
+mpc_local() { timeout 5 mpc -h "$MPD_HOST" -p "$MPD_PORT" "$@"; }
+stream_up() {
+    # Expanded by the child bash, with host/port passed as positional arguments.
+    # shellcheck disable=SC2016
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' bash "$STREAM_HOST" "$STREAM_PORT" >/dev/null 2>&1
+}
+log() { logger -t lan-jukebox-healthcheck -- "$*"; }
+output_enabled() { grep -Fq "(${STREAM_OUTPUT}) is enabled" <<<"$1"; }
+
+check_and_repair() {
+    local status outputs queue
+    systemctl is-active --quiet "$MPD_SERVICE" || return 1
+    status="$(mpc_local status 2>/dev/null)" || return 1
+    outputs="$(mpc_local outputs 2>/dev/null)" || return 1
+    if ! output_enabled "$outputs"; then
+        # Pass the name literally, never interpolate it into a regular expression.
+        log "Enabling output: $STREAM_OUTPUT"
+        mpc_local enable "$STREAM_OUTPUT" >/dev/null 2>&1 || return 1
+    fi
+    if [[ "$status" == *"ERROR: Failed to open audio output"* ]]; then
+        log 'Resuming after audio output failure'
+        mpc_local play >/dev/null 2>&1 || return 1
+        status="$(mpc_local status 2>/dev/null)" || return 1
+    fi
+    stream_up && return 0
+    if [[ "$status" != *"[playing]"* && "$status" != *"[paused]"* ]]; then
+        # MPD httpd may not bind until first playback. An empty queue is normal.
+        queue="$(mpc_local playlist -f '%file%' 2>/dev/null)" || return 1
+        [[ -z "$queue" || "$START_STOPPED" != 1 ]] && return 0
+        log 'Stream down while stopped; starting playback to bind httpd'
+        mpc_local play >/dev/null 2>&1 || return 1
+        sleep 2
+        stream_up && return 0
+    fi
+    return 1
+}
+
+for _attempt in 1 2 3; do
+    check_and_repair && exit 0
+    sleep 5
+done
+log 'MPD failed three checks; restarting service'
+systemctl restart "$MPD_SERVICE" || exit 1
+sleep 5
+if check_and_repair; then
+    log 'MPD recovered after automatic restart'
+else
+    log 'MPD remains unhealthy after restart'
+    exit 1
+fi

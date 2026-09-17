@@ -1,0 +1,19 @@
+[Unit]
+Description=Check and repair LAN jukebox control and stream listeners
+After=lan-jukebox-mpd.service
+
+[Service]
+Type=oneshot
+# Skip intentionally stopped MPD. Do not use Requires/Requisite here: the
+# watchdog must survive the restart it requests itself.
+ExecCondition=/usr/bin/systemctl is-active --quiet lan-jukebox-mpd.service
+EnvironmentFile=-/etc/lan-jukebox/server.env
+ExecStart=/usr/local/libexec/lan-jukebox-healthcheck
+TimeoutStartSec=3min
+# Root is needed only for systemctl restart; MPD itself remains unprivileged.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictSUIDSGID=yes
+UMask=0077

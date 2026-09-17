@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Best-effort crash recovery, not a replacement for MPD's persistent state file.
+set -uo pipefail
+export LC_ALL=C
+umask 0077
+MPD_HOST="${MPD_HOST:-127.0.0.1}"
+MPD_PORT="${MPD_PORT:-6600}"
+STREAM_OUTPUT="${STREAM_OUTPUT:-FLAC LAN Stream}"
+RUNTIME_DIR="${RECOVERY_DIR:-/run/lan-jukebox-recovery}"
+SNAPSHOT="$RUNTIME_DIR/playback.snapshot"
+MARKER="$RUNTIME_DIR/recover.snapshot"
+
+mpc_local() { timeout 5 mpc -h "$MPD_HOST" -p "$MPD_PORT" "$@"; }
+log() { logger -t lan-jukebox-recovery -- "$*"; }
+field() { sed -n "s/^${1}=//p" "$2" | head -n 1; }
+queue_hash() {
+    # pipefail is essential: a failed MPD query must not hash as an empty queue.
+    mpc_local playlist -f '%file%' | sha256sum | awk '{print $1}'
+}
+snapshot() {
+    local status state position elapsed hash temporary
+    status="$(mpc_local status 2>/dev/null)" || return 0
+    state=stopped
+    [[ "$status" == *"[playing]"* ]] && state=playing
+    [[ "$status" == *"[paused]"* ]] && state=paused
+    position="$(mpc_local current -f '%position%' 2>/dev/null)" || return 0
+    elapsed="$(awk '/^\[(playing|paused)\]/ {split($3,t,"/"); print t[1]; exit}' <<<"$status")"
+    hash="$(queue_hash 2>/dev/null)" || return 0
+    [[ "$position" =~ ^[1-9][0-9]*$ ]] || position=""
+    [[ "$elapsed" =~ ^[0-9]+(:[0-9][0-9]){1,2}$ ]] || elapsed=0:00
+    temporary="$(mktemp "$RUNTIME_DIR/snapshot.XXXXXX")" || return 0
+    if printf 'state=%s\nposition=%s\nelapsed=%s\nqueue_hash=%s\n' \
+        "$state" "$position" "$elapsed" "$hash" >"$temporary"; then
+        mv -f "$temporary" "$SNAPSHOT"
+    fi
+    rm -f "$temporary"
+}
+mark() {
+    local state
+    # Only an explicit failure reported by systemd authorizes crash recovery.
+    case "${SERVICE_RESULT:-success}" in
+        success) rm -f "$MARKER"; return 0 ;;
+    esac
+    [[ -s "$SNAPSHOT" ]] || return 0
+    state="$(field state "$SNAPSHOT")"
+    [[ "$state" == playing || "$state" == paused ]] || return 0
+    cp -f "$SNAPSHOT" "$MARKER"
+    log "Unexpected MPD exit (${SERVICE_RESULT}); marked $state for recovery"
+}
+restore() {
+    local state position elapsed expected current outputs
+    [[ -s "$MARKER" ]] || return 0
+    state="$(field state "$MARKER")"
+    position="$(field position "$MARKER")"
+    elapsed="$(field elapsed "$MARKER")"
+    expected="$(field queue_hash "$MARKER")"
+    # Consume once; never execute/source snapshot contents.
+    rm -f "$MARKER"
+    [[ "$state" == playing || "$state" == paused ]] || return 0
+    [[ "$position" =~ ^[1-9][0-9]*$ ]] || return 0
+    [[ "$elapsed" =~ ^[0-9]+(:[0-9][0-9]){1,2}$ ]] || return 0
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 0
+    current="$(queue_hash 2>/dev/null)" || return 0
+    if [[ "$current" != "$expected" ]]; then
+        log 'Skipped recovery: queue changed since snapshot'
+        return 0
+    fi
+    outputs="$(mpc_local outputs 2>/dev/null)" || return 0
+    if ! grep -Fq "(${STREAM_OUTPUT}) is enabled" <<<"$outputs"; then
+        mpc_local enable "$STREAM_OUTPUT" >/dev/null 2>&1 || return 0
+    fi
+    mpc_local play "$position" >/dev/null 2>&1 || return 0
+    mpc_local seek "$elapsed" >/dev/null 2>&1 || return 0
+    if [[ "$state" == paused ]]; then
+        mpc_local pause >/dev/null 2>&1 || return 0
+    fi
+    log "Restored $state at queue position $position, elapsed $elapsed"
+    snapshot
+}
+
+case "${1:-}" in
+    snapshot|mark|restore) ;;
+    *) echo "usage: $0 snapshot|mark|restore" >&2; exit 2 ;;
+esac
+[[ -d "$RUNTIME_DIR" ]] || exit 0
+# Serialize timer snapshots with stop/start hooks; atomic snapshot replacement.
+exec 9>"$RUNTIME_DIR/recovery.lock"
+flock -w 10 9 || exit 0
+"$1"

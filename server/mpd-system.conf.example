@@ -1,0 +1,33 @@
+# Optional system-service profile; see RELIABILITY.md for installation.
+# User/group and state directory ownership are set by systemd, not this file.
+music_directory     "/srv/music"
+playlist_directory  "/var/lib/lan-jukebox/playlists"
+db_file             "/var/lib/lan-jukebox/database"
+state_file          "/var/lib/lan-jukebox/state"
+sticker_file        "/var/lib/lan-jukebox/sticker.sql"
+# With --no-daemon, no pid_file is needed; logs go to the journal.
+log_file            "syslog"
+
+bind_to_address     "0.0.0.0"
+port                "6600"
+max_connections     "50"
+connection_timeout  "60"
+auto_update         "yes"
+restore_paused      "yes"
+filesystem_charset  "UTF-8"
+metadata_to_use     "artist,album,title,track,name,genre,date,albumartist"
+
+audio_output {
+    type            "httpd"
+    name            "FLAC LAN Stream"
+    mixer_type      "software"
+    encoder         "flac"
+    port            "8000"
+    bind_to_address "0.0.0.0"
+    compression     "5"
+    format          "44100:16:2"
+    always_on       "yes"
+    tags            "yes"
+    max_clients     "20"
+    dscp_class      "CS3"
+}

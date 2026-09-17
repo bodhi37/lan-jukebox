@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic LAN jukebox health check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=lan-jukebox-healthcheck.service
+
+[Install]
+WantedBy=timers.target

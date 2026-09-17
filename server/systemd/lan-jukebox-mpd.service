@@ -1,0 +1,31 @@
+[Unit]
+Description=LAN jukebox MPD server
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/music /var/lib/lan-jukebox
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=mpd
+Group=audio
+EnvironmentFile=-/etc/lan-jukebox/server.env
+ExecStart=/usr/bin/mpd --no-daemon /etc/lan-jukebox/mpd.conf
+ExecStartPost=/usr/local/libexec/lan-jukebox-recovery restore
+ExecStopPost=/usr/local/libexec/lan-jukebox-recovery mark
+Restart=always
+RestartSec=5s
+StateDirectory=lan-jukebox
+StateDirectoryMode=0750
+RuntimeDirectory=lan-jukebox-recovery
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

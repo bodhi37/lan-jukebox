@@ -1,0 +1,20 @@
+[Unit]
+Description=Snapshot LAN jukebox playback for crash recovery
+After=lan-jukebox-mpd.service
+Requisite=lan-jukebox-mpd.service
+ConditionPathIsDirectory=/run/lan-jukebox-recovery
+
+[Service]
+Type=oneshot
+User=mpd
+Group=audio
+EnvironmentFile=-/etc/lan-jukebox/server.env
+ExecStart=/usr/local/libexec/lan-jukebox-recovery snapshot
+TimeoutStartSec=45s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/lan-jukebox-recovery
+RestrictSUIDSGID=yes
+UMask=0077
